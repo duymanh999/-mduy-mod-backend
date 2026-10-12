@@ -285,23 +285,32 @@ async function encryptZip(zipBuffer, password) {
 }
 
 async function shortenWithLink4m(targetUrl) {
-  const url = new URL("https://link4m.co/api-shorten/v2/");
+  // Link4m API documentation:
+  // GET https://link4m.co/api-shorten/v2?api=TOKEN&url=DESTINATION
+  const url = new URL("https://link4m.co/api-shorten/v2");
   url.searchParams.set("api", LINK4M_API_TOKEN);
   url.searchParams.set("url", targetUrl);
 
-  const response = await fetch(url);
-  const text = await response.text();
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Accept": "application/json"
+    }
+  });
+
+  const body = await response.text();
 
   let data;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(body);
   } catch {
+    console.error("Link4m raw response:", body.slice(0, 1000));
     throw new Error("Link4m trả về dữ liệu không hợp lệ.");
   }
 
-  if (!response.ok || !data.shortenedUrl) {
+  if (!response.ok || data.status !== "success" || !data.shortenedUrl) {
     throw new Error(
-      data.message || "Không tạo được Link4m."
+      data.message || "Link4m không tạo được link."
     );
   }
 
