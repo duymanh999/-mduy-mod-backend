@@ -29,9 +29,6 @@ function dayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function randomPassword() {
-  return crypto.randomBytes(9).toString("base64url");
-}
 
 function randomId() {
   return crypto.randomBytes(18).toString("base64url");
@@ -112,19 +109,15 @@ app.post("/api/mod/create", async (req, res) => {
     }
 
     const id = randomId();
-    const password = randomPassword();
     const raw = Buffer.from(zipBase64, "base64");
 
-    // Encrypt the user's original ZIP with a unique random password.
-    const encrypted = await encryptZip(raw, password);
-
+    // No password: keep the generated ZIP and release it from the Link4m
+    // destination page after the user completes Link4m.
     const job = {
       id,
-      password,
-      encrypted,
+      zip: raw,
       filename: safeName(filename || "MDUY-MOD.zip"),
       createdAt: Date.now(),
-      claimed: false,
       ip
     };
 
@@ -146,7 +139,7 @@ app.post("/api/mod/create", async (req, res) => {
       shortUrl,
       downloadUrl:
         `${PUBLIC_BASE_URL}/api/mod/download/${encodeURIComponent(id)}`,
-      message: "Đi qua Link4m để nhận mật khẩu."
+      message: "Đi qua Link4m để tới trang tải ZIP."
     });
   } catch (e) {
     console.error(e);
@@ -163,78 +156,32 @@ app.get("/claim/:id", (req, res) => {
     return res.status(404).send("Link đã hết hạn hoặc không tồn tại.");
   }
 
-  if (job.claimed) {
-    return res.status(410).send("Link này đã được sử dụng.");
-  }
-
   res.type("html").send(`<!doctype html>
 <html lang="vi">
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MDUY MOD FF</title>
+<title>MDUY MOD FF — Tải ZIP</title>
 <style>
-body{
-  font-family:system-ui,-apple-system,sans-serif;
-  background:#09090b;
-  color:#fff;
-  padding:40px 20px;
-  text-align:center;
-}
-button{
-  padding:14px 22px;
-  border:0;
-  border-radius:12px;
-  font-weight:700;
-  font-size:16px;
-}
-pre{
-  white-space:pre-wrap;
-  word-break:break-word;
-  margin-top:20px;
-}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;font-family:system-ui,-apple-system,sans-serif;background:#09090b;color:#fff}
+.card{width:min(460px,100%);padding:26px;border:1px solid #5967a5;border-radius:22px;background:linear-gradient(145deg,#111833,#28122f);box-shadow:0 25px 90px #000b;text-align:center}
+.kicker{color:#62eaff;font-size:10px;font-weight:900;letter-spacing:2px}
+h1{margin:8px 0 10px;font-size:25px}
+p{color:#bfc8e8;line-height:1.6}
+button{width:100%;padding:14px;border:0;border-radius:12px;font-size:16px;font-weight:900;cursor:pointer;background:linear-gradient(100deg,#65ffd0,#45e7ff 34%,#8d7aff 68%,#ff5fcf);color:#07101d}
+.small{font-size:11px;color:#929dc5;margin-top:12px}
 </style>
 </head>
 <body>
-<h2>MDUY MOD FF</h2>
-<p>Nhấn nút để nhận mật khẩu ZIP.</p>
-<button onclick="claim()">LẤY MẬT KHẨU</button>
-<pre id="o"></pre>
-<script>
-async function claim(){
-  const r = await fetch(
-    '/api/mod/claim/${encodeURIComponent(req.params.id)}',
-    { method:'POST' }
-  );
-  const d = await r.json();
-  document.getElementById('o').textContent =
-    d.password
-      ? 'Mật khẩu: ' + d.password
-      : (d.error || 'Lỗi');
-}
-</script>
+<div class="card">
+  <div class="kicker">MDUY MOD FF</div>
+  <h1>Link đã hoàn tất</h1>
+  <p>ZIP đã sẵn sàng. Bấm nút bên dưới để tải file.</p>
+  <button onclick="location.href='/api/mod/download/${encodeURIComponent(req.params.id)}'">TẢI ZIP</button>
+  <div class="small">Không cần mật khẩu.</div>
+</div>
 </body>
 </html>`);
-});
-
-app.post("/api/mod/claim/:id", (req, res) => {
-  const job = jobs.get(req.params.id);
-
-  if (!job) {
-    return res.status(404).json({ error: "Link hết hạn." });
-  }
-
-  if (job.claimed) {
-    return res.status(410).json({
-      error: "Mật khẩu đã được nhận."
-    });
-  }
-
-  job.claimed = true;
-
-  res.json({
-    password: job.password,
-    filename: job.filename
-  });
 });
 
 app.get("/api/mod/download/:id", (req, res) => {
@@ -250,7 +197,7 @@ app.get("/api/mod/download/:id", (req, res) => {
     `attachment; filename="${job.filename}"`
   );
 
-  res.send(job.encrypted);
+  res.send(job.zip);
 });
 
 function safeName(name) {
@@ -259,30 +206,6 @@ function safeName(name) {
     .slice(0, 120) || "MDUY-MOD.zip";
 }
 
-async function encryptZip(zipBuffer, password) {
-  return await new Promise((resolve, reject) => {
-    const chunks = [];
-
-    const archive = archiver.create("zip-encrypted", {
-      zlib: { level: 0 },
-      encryptionMethod: "aes256",
-      password
-    });
-
-    archive.on("data", chunk => chunks.push(chunk));
-    archive.on("error", reject);
-    archive.on("end", () => {
-      resolve(Buffer.concat(chunks));
-    });
-
-    archive.append(zipBuffer, {
-      name: "MDUY-MOD-PACKAGE.zip",
-      store: true
-    });
-
-    archive.finalize();
-  });
-}
 
 async function shortenWithLink4m(targetUrl) {
   // Link4m API documentation:
