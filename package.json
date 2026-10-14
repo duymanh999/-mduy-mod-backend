@@ -1,18 +1,14 @@
 {
   "name": "mduy-mod-backend",
-  "version": "1.1.0",
-  "private": true,
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=20"
-  },
   "dependencies": {
     "archiver": "^7.0.1",
     "archiver-zip-encrypted": "^2.0.0",
-    "express": "^5.1.0",
-    "pg": "^8.16.3"
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
   }
 }

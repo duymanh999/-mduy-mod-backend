@@ -111,66 +111,60 @@ app.post("/api/admin/keys/:id/revoke", requireDb, adminOnly, async (req, res) =>
   } catch (e) { console.error("revoke key:", e); res.status(500).json({ error: "Không thu hồi được key." }); }
 });
 
-app.post("/api/mod/create", async (req, res) => {
+app.post("/api/mod/create", requireDb, async (req, res) => {
   let reservedKeyHash = null;
   let createdJobId = null;
   try {
+    if (!PUBLIC_BASE_URL) return res.status(500).json({ error: "PUBLIC_BASE_URL chưa được cấu hình" });
     const { zipBase64, filename, key: userKey } = req.body || {};
-    if (typeof zipBase64 !== "string" || zipBase64.length < 20) {
-      return res.status(400).json({ error: "Thiếu ZIP." });
-    }
+    if (typeof zipBase64 !== "string" || zipBase64.length < 20) return res.status(400).json({ error: "Thiếu ZIP." });
     const raw = Buffer.from(zipBase64, "base64");
     if (!raw.length) return res.status(400).json({ error: "ZIP không hợp lệ." });
 
-    const id = randomId();
+    const hasKey = typeof userKey === "string" && userKey.trim().length > 0;
     const ip = ipOf(req);
-    const safeFilename = safeName(filename || "MDUY-MOD.zip");
+    const dailyKey = `${ip}:${dayKey()}`;
+    const used = usage.get(dailyKey)?.count || 0;
 
-    // Paid-key path: consume one use and download directly, without Link4m or the free daily IP cap.
-    if (typeof userKey === "string" && userKey.trim()) {
-      if (!pool) return res.status(503).json({ error: "Hệ thống key chưa kết nối cơ sở dữ liệu." });
+    // Key users reserve one use atomically and bypass both Link4m and the IP/day cap.
+    if (hasKey) {
       const reserve = await pool.query(`UPDATE access_keys SET uses_remaining=uses_remaining-1, updated_at=NOW()
         WHERE key_hash=$1 AND revoked=FALSE AND uses_remaining>0
         RETURNING key_hash, uses_remaining`, [hashKey(userKey)]);
       if (!reserve.rowCount) return res.status(403).json({ error: "Key không hợp lệ, đã bị thu hồi hoặc hết lượt." });
       reservedKeyHash = reserve.rows[0].key_hash;
-      jobs.set(id, { id, zip: raw, filename: safeFilename, createdAt: Date.now(), ip });
-      createdJobId = id;
-      const remaining = reserve.rows[0].uses_remaining;
-      reservedKeyHash = null; // Consume only after ZIP job is stored successfully.
-      return res.json({ id, directDownload: true, usesRemaining: remaining,
-        downloadUrl: `${PUBLIC_BASE_URL}/api/mod/download/${encodeURIComponent(id)}`,
-        message: "MOD đã sẵn sàng để tải trực tiếp." });
+    } else {
+      // No-key users keep the original 3 creations/day/IP + Link4m flow.
+      if (used >= 3) return res.status(429).json({ error: "IP này đã dùng hết 3 lượt hôm nay. Nhập key hợp lệ để dùng lượt key." });
+      if (!LINK4M_API_TOKEN) return res.status(500).json({ error: "LINK4M_API_TOKEN chưa được cấu hình" });
     }
 
-    // Legacy/free path: keep the original Link4m flow and 3-creation-per-IP-per-day limit.
-    if (!LINK4M_API_TOKEN) return res.status(500).json({ error: "LINK4M_API_TOKEN chưa được cấu hình" });
-    if (!PUBLIC_BASE_URL) return res.status(500).json({ error: "PUBLIC_BASE_URL chưa được cấu hình" });
-    const dailyKey = `${ip}:${dayKey()}`;
-    const used = usage.get(dailyKey)?.count || 0;
-    if (used >= 3) return res.status(429).json({ error: "IP này đã dùng hết 3 lượt hôm nay." });
-
-    jobs.set(id, { id, zip: raw, filename: safeFilename, createdAt: Date.now(), ip });
+    const id = randomId();
     createdJobId = id;
+    const cleanFilename = safeName(filename || "MDUY-MOD.zip");
+    jobs.set(id, { id, zip: raw, filename: cleanFilename, createdAt: Date.now(), ip });
+    const downloadUrl = `${PUBLIC_BASE_URL}/api/mod/download/${encodeURIComponent(id)}`;
+
+    if (hasKey) {
+      const remaining = await pool.query("SELECT uses_remaining FROM access_keys WHERE key_hash=$1", [reservedKeyHash]);
+      reservedKeyHash = null; // Successful creation consumes exactly one key use.
+      return res.json({ id, directDownload: true, downloadUrl, usesRemaining: remaining.rows[0]?.uses_remaining ?? 0, message: "Key hợp lệ: tải ZIP trực tiếp, không cần Link4m." });
+    }
+
     const claimUrl = `${PUBLIC_BASE_URL}/claim/${encodeURIComponent(id)}`;
-    let shortUrl;
-    try { shortUrl = await shortenWithLink4m(claimUrl); }
-    catch (e) { jobs.delete(id); createdJobId = null; throw e; }
+    const shortUrl = await shortenWithLink4m(claimUrl);
     usage.set(dailyKey, { day: dayKey(), count: used + 1 });
-    return res.json({ id, shortUrl,
-      downloadUrl: `${PUBLIC_BASE_URL}/api/mod/download/${encodeURIComponent(id)}`,
-      message: "Đi qua Link4m để tới trang tải ZIP." });
+    return res.json({ id, shortUrl, directDownload: false, downloadUrl, message: "Đi qua Link4m để tới trang tải ZIP." });
   } catch (e) {
+    if (createdJobId) jobs.delete(createdJobId);
     if (reservedKeyHash) {
       try { await pool.query("UPDATE access_keys SET uses_remaining=uses_remaining+1, updated_at=NOW() WHERE key_hash=$1 AND revoked=FALSE", [reservedKeyHash]); }
       catch (refundError) { console.error("Không hoàn lại được lượt key:", refundError); }
     }
-    if (createdJobId) jobs.delete(createdJobId);
-    console.error("MOD create error:", e);
-    return res.status(500).json({ error: e.message || "Server error" });
+    console.error(e);
+    res.status(500).json({ error: e.message || "Server error" });
   }
 });
-
 app.get("/claim/:id", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).send("Link đã hết hạn hoặc không tồn tại.");
